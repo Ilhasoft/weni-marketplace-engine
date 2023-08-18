@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from marketplace.applications.models import App
 from marketplace.core.serializers import AppTypeBaseSerializer
+from marketplace.wpp_products.models import Catalog, Product
 
 
 # TODO: Remove unnecessary serializers
@@ -28,3 +29,24 @@ class WhatsAppCloudConfigureSerializer(serializers.Serializer):
     waba_id = serializers.CharField(required=True)
     phone_number_id = serializers.CharField(required=True)
     business_id = serializers.CharField(required=True)
+
+
+class CatalogSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(required=True)
+    facebook_catalog_id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Catalog
+        fields = ("uuid", "name", "facebook_catalog_id")
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = (
+            "uuid",
+            "title ",
+            "facebook_product_id ",
+            "product_retailer_id ",
+            "catalog",
+        )

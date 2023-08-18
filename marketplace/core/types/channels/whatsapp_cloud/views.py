@@ -4,12 +4,16 @@ from typing import TYPE_CHECKING
 
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
-from rest_framework import status
+from rest_framework import (
+    status,
+    viewsets,
+)
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException
 
 from django.conf import settings
 from django.utils.crypto import get_random_string
+from django.shortcuts import get_object_or_404
 
 if TYPE_CHECKING:
     from rest_framework.request import Request  # pragma: no cover
@@ -19,6 +23,7 @@ from marketplace.applications.models import App
 from marketplace.celery import app as celery_app
 from marketplace.connect.client import ConnectProjectClient
 from marketplace.flows.client import FlowsClient
+from marketplace.wpp_products.models import Catalog  # Product
 
 from ..whatsapp_base import mixins
 from ..whatsapp_base.serializers import WhatsAppSerializer
@@ -27,7 +32,7 @@ from ..whatsapp_base.exceptions import FacebookApiException
 from .facades import CloudProfileFacade, CloudProfileContactFacade
 from .requests import PhoneNumbersRequest
 
-from .serializers import WhatsAppCloudConfigureSerializer
+from .serializers import WhatsAppCloudConfigureSerializer, CatalogSerializer
 
 
 class WhatsAppCloudViewSet(
@@ -340,3 +345,116 @@ class WhatsAppCloudViewSet(
         )
 
         return Response(status=response.status_code)
+
+
+TEMP_SYS_TOKEN = "token"
+
+
+class Fake_reponse:
+    def json():
+        return {"id": "6720539828010289"}
+
+
+class FacebookApi:
+    def create_catalog(self, business_id, name):
+        return Fake_reponse
+
+
+class FacebookProductsApi:
+    def __init__(self, access_token):
+        self.access_token = access_token
+
+    def upload_product_feed(self, product_feed_id, file_path, update_only=False):
+        url = f"https://graph.facebook.com/{product_feed_id}/uploads"
+        params = {"access_token": self.access_token}
+        if update_only:
+            params["update_only"] = "true"
+        files = {"file": ("catalog.csv", open(file_path, "rb"), "text/csv")}
+        response = requests.post(url, params=params, files=files)
+        files["file"][1].close()
+        return response
+
+
+class CatalogViewSet(viewsets.ViewSet):
+    serializer_class = CatalogSerializer
+
+    def create(self, request, app_uuid, *args, **kwargs):
+        app = get_object_or_404(App, uuid=app_uuid, code="wpp-cloud")
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        name = serializer.validated_data["name"]
+        business_id = app.config.get("wa_business_id")
+        if business_id is None:
+            raise ValidationError(
+                "The app does not have a business id on [config.wa_business_id]"
+            )
+
+        client = FacebookApi()
+        response = client.create_catalog(business_id, name)
+
+        if response:
+            facebook_catalog_id = response.json().get("id")
+            try:
+                catalog = Catalog.objects.create(
+                    app=app,
+                    facebook_catalog_id=facebook_catalog_id,
+                    name=name,
+                    created_by=self.request.user,
+                )
+
+                serializer = CatalogSerializer(catalog)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(serializer.data, status=status.HTTP_400_BAD_REQUEST)
+
+    def retrieve(self, request, app_uuid, catalog_uuid, *args, **kwargs):
+        catalog = get_object_or_404(Catalog, uuid=catalog_uuid, app__uuid=app_uuid)
+        serializer = self.serializer_class(catalog)
+        return Response(serializer.data)
+
+    def list(self, request, app_uuid, *args, **kwargs):
+        catalogs = Catalog.objects.filter(app__uuid=app_uuid)
+        serializer = self.serializer_class(catalogs, many=True)
+        return Response(serializer.data)
+
+
+class ProductViewSet(
+    viewsets.ViewSet
+):  # TODO: this is just the base, still needs to be done
+    def create(self, request, app_uuid, catalog_uuid, *args, **kwargs):
+        catalog = get_object_or_404(Catalog, uuid=catalog_uuid, app__uuid=app_uuid)
+        file_obj = request.FILES["file"]
+        csv_file_path = "/path/to/save/csv/file.csv"
+
+        # temp
+        with open(csv_file_path, "wb+") as destination:
+            for chunk in file_obj.chunks():
+                destination.write(chunk)
+
+        client = FacebookProductsApi(access_token=TEMP_SYS_TOKEN)
+        response = client.upload_product_feed(
+            catalog.facebook_catalog_id, csv_file_path
+        )
+
+        if response.status_code == 200:
+            # csv_file = pd.read_csv(csv_file_path)
+            # for index, row in csv_file.iterrows():
+            #     Product.objects.create(
+            #         facebook_product_id=row["id"],
+            #         title=row["title"],
+            #         product_retailer_id=row["product_retailer_id"],
+            #         catalog=catalog,
+            #     )
+
+            return Response(
+                {"detail": "Products added successfully"},
+                status=status.HTTP_201_CREATED,
+            )
+        else:
+            return Response(
+                {"detail": "Failed to upload products"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
